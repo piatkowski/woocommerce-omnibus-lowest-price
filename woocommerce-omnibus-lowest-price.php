@@ -15,7 +15,7 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 
 		const VERSION = '1.0.0.1';
 		const MONTH_IN_SECONDS = 2678400;
-		const META_KET = 'wcolp_data';
+		const META_KEY = 'wcolp_data';
 
 		private static ?WCOLP_Plugin $instance = null;
 
@@ -37,8 +37,11 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 		private function __construct() {
 			add_action( 'wp_enqueue_scripts', [ $this, 'enqueue_assets' ] );
 			add_action( 'save_post_product', [ $this, 'before_product_save' ] );
-			add_action( 'woocommerce_before_single_variation', [ $this, 'render_variable_product_page' ], 99 );
-			add_action( 'woocommerce_single_product_summary', [ $this, 'render_product_page' ], 25 );
+			//add_action( 'woocommerce_before_single_variation', [ $this, 'render_variable_product_page' ], 99 );
+			//add_action( 'woocommerce_single_product_summary', [ $this, 'render_product_page' ], 25 );
+			add_action( 'woocommerce_product_meta_start', [ $this, 'render_variable_product_page' ], 10 );
+			add_action( 'woocommerce_product_meta_start', [ $this, 'render_product_page' ], 10 );
+
 			add_action( 'woocommerce_after_shop_loop_item_title', [ $this, 'render_product_list' ], 99 );
 			add_action( 'woocommerce_variation_options', [ $this, 'admin_variations_info' ], 10, 3 );
 		}
@@ -102,21 +105,22 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 				}
 			}
 			$can_update = false;
-			if ( ! $product->meta_exists( self::META_KET ) ) {
+			if ( ! $product->meta_exists( self::META_KEY ) ) {
 				$can_update = true;
 			} else {
-				$data = $product->get_meta( self::META_KET );
-				if ( $product->get_price() < $data['price'] || time() - $data['time'] > MONTH_IN_SECONDS ) {
+				$data = $product->get_meta( self::META_KEY );
+				if ( empty($data) || empty($data['price']) || floatval($product->get_price()) < floatval($data['price']) || time() - $data['time'] > MONTH_IN_SECONDS ) {
 					$can_update = true;
 				}
 			}
 			if ( $can_update ) {
-				$product->update_meta_data( self::META_KET, [
+				$product->update_meta_data( self::META_KEY, [
 					'time'  => time(),
-					'price' => $product->get_price()
+					'price' => floatval($product->get_price())
 				] );
 				$product->save_meta_data();
 			}
+
 		}
 
 		/**
@@ -128,10 +132,10 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 		 */
 		private function get_frontent_message( $product_id ) {
 			$product = wc_get_product( $product_id );
-			if ( $product->meta_exists( self::META_KET ) && $product->is_on_sale() ) {
-				$data  = $product->get_meta( self::META_KET );
+			if ( $product->meta_exists( self::META_KEY ) && $product->is_on_sale() ) {
+				$data  = $product->get_meta( self::META_KEY );
 				$time  = $data['time'] ?? null;
-				$price = $data['price'] ?? null;
+				$price = floatval($data['price']) ?? null;
 				if ( $time && $price ) {
 					if ( time() - $time > self::MONTH_IN_SECONDS ) {
 						$price = $product->get_regular_price();
@@ -171,7 +175,7 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 				if ( $product->is_type( 'variable' ) ) {
 					if ( ! $product->is_on_sale() ) {
 						$prices       = $product->get_variation_prices();
-						$price        = current( $prices['price'] ); //point to first element
+						$price        = floatval( current( $prices['price'] ) ); //point to first element
 						$variation_id = key( $prices['price'] ); //get first ID
 					} else {
 						$spri = 999999; //sale price
