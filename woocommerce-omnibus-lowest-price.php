@@ -270,11 +270,12 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 		public function render_price_override_block( $product_object, $name_suffix = '_single' ) {
 			woocommerce_wp_checkbox( array(
 				'id'                => '_wcolp_price_override_enabled' . $name_suffix,
-				'label'             => 'Chcę nadpisać cenę',
-				'wrapper_class'     => 'wcolp_form-field form-row form-row-first',
+				'label'             => 'Nadpisuję cenę',
+				'wrapper_class'     => $name_suffix !== '_single' ? 'wcolp_form-field form-row form-row-first' : '',
 				'description'       => __( 'Zaznacz, aby nadpisać najniższą cenę z 30 dni', 'woocommerce' ),
 				'custom_attributes' => array(
-					'onchange' => "jQuery('#_wcolp_price_override" . $name_suffix . "').prop('disabled', (i, v) => !v)"
+					'onchange' => "jQuery('#_wcolp_price_override" . $name_suffix . "').prop('disabled', ! jQuery(this).is(':checked'))",
+					'autocomplete' => 'off'
 				)
 			) );
 
@@ -285,7 +286,7 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 				array(
 					'id'                => '_wcolp_price_override' . $name_suffix,
 					'value'             => $meta_exists ? $meta_data['price'] : 0,
-					'wrapper_class'     => 'wcolp_form-field form-row form-row-last',
+					'wrapper_class'     => $name_suffix !== '_single' ? 'wcolp_form-field form-row form-row-last' : '',
 					'label'             => 'Najniższa cena z 30 dni (' . get_woocommerce_currency_symbol() . ')',
 					'data_type'         => 'price',
 					'custom_attributes' => array(
