@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce Omnibus Lowest Price
  * Description: Plugin automatically remembers and displays the lowest price of the product before the discount from the last 30 days.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Krzysztof Piątkowski
  * Author URI: https://github.com/piatkowski/
  * License: GPL2
@@ -13,14 +13,25 @@ defined( 'ABSPATH' ) or die( 'No direct script access' );
 if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 	class WCOLP_Plugin {
 
-		const VERSION = '1.1.0.0';
+		const VERSION = '1.2.0.0';
+
 		const MONTH_IN_SECONDS = 2678400;
+
 		const META_KEY = 'wcolp_data';
 
+		/**
+		 * @var WCOLP_Plugin|null singleton instance
+		 */
 		private static ?WCOLP_Plugin $instance = null;
 
 		/**
+		 * @var array product updated cache
+		 */
+		private $updated_products = [];
+
+		/**
 		 * Get singleton instance
+		 *
 		 * @return WCOLP_Plugin
 		 */
 		public static function instance(): WCOLP_Plugin {
@@ -35,127 +46,102 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 		 * Registers hooks on class creation
 		 */
 		private function __construct() {
+
+			/* Assets */
 			add_action( 'wp_enqueue_scripts', [ $this, 'enqueue_assets' ] );
 			add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
-			add_action( 'save_post_product', [ $this, 'before_product_save' ] );
-			add_action( 'woocommerce_save_product_variation', [ $this, 'after_variation_save' ], 10 );
-			//add_action( 'woocommerce_before_single_variation', [ $this, 'render_variable_product_page' ], 99 );
-			//add_action( 'woocommerce_single_product_summary', [ $this, 'render_product_page' ], 25 );
-			add_action( 'woocommerce_product_meta_start', [ $this, 'render_variable_product_page' ], 10 );
+
+			/* Frontend */
 			add_action( 'woocommerce_product_meta_start', [ $this, 'render_product_page' ], 10 );
-
 			add_action( 'woocommerce_after_shop_loop_item_title', [ $this, 'render_product_list' ], 99 );
-			add_action( 'woocommerce_variation_options', [ $this, 'admin_variations_info' ], 10, 3 );
 
-			add_action( 'woocommerce_product_options_pricing', [ $this, 'simple_product_options' ] );
+			/* Admin - views */
+			add_action( 'woocommerce_variation_options', [ $this, 'variation_options' ], 10, 3 );
+			add_action( 'woocommerce_product_options_pricing', [ $this, 'product_options' ] );
+
+			/* Admin - events */
+			add_action( 'woocommerce_product_object_updated_props', [ $this, 'product_updated' ], 10, 2 );
+
 		}
 
 		/**
-		 * Enqueue styles and scripts
-		 * @return void
-		 */
-		public function enqueue_assets() {
-			if ( is_product() ) {
-				wp_enqueue_script(
-					'wcolp-js',
-					plugins_url( '/', __FILE__ ) . 'script.min.js',
-					array( 'jquery' ),
-					self::VERSION
-				);
-				global $post;
-				wp_add_inline_script( 'wcolp-js', 'const WCOLP = ' . json_encode( $this->get_price_data( $post->ID ) ), 'before' );
-			}
-			wp_register_style(
-				'wcolp-css',
-				plugins_url( '/', __FILE__ ) . 'style.min.css',
-				array(),
-				self::VERSION
-			);
-			wp_enqueue_style( 'wcolp-css' );
-		}
-
-		/**
-		 * Update product/variation WCOLP meta data (lowest price and timestamp)
+		 * Update product or variation WCOLP metadata (lowest price and timestamp)
 		 *
 		 * @param $product
+		 * @param $price_before
 		 *
 		 * @return void
 		 */
-		private function maybe_auto_update_product_meta( $product ) {
+		private function maybe_update_lowest_price( $product, $price_before ) {
+
 			$can_update = false;
 			if ( ! $product->meta_exists( self::META_KEY ) ) {
 				$can_update = true;
 			} else {
 				$data = $product->get_meta( self::META_KEY );
-				if ( empty( $data ) || empty( $data['price'] ) || floatval( $product->get_price() ) < floatval( $data['price'] ) || time() - $data['time'] > MONTH_IN_SECONDS ) {
+
+				if ( empty( $data ) || empty( $data['price'] ) || floatval( str_replace( ',', '.', $price_before ) ) < floatval( $data['price'] ) || time() - $data['time'] > MONTH_IN_SECONDS ) {
 					$can_update = true;
 				}
 			}
 			if ( $can_update ) {
 				$product->update_meta_data( self::META_KEY, [
 					'time'  => time(),
-					'price' => floatval( $product->get_price() )
+					'price' => floatval( $price_before )
 				] );
 				$product->save_meta_data();
 			}
 		}
 
 		/**
-		 * Get product and variations metadata saved by this plugin (price and timestamp)
+		 * Update WCOLP metadata on product save (on props updated)
 		 *
-		 * @param $product_id
-		 *
-		 * @return array
-		 */
-		private function get_price_data( $product_id ) {
-			$product             = wc_get_product( $product_id );
-			$data[ $product_id ] = $this->get_frontent_message( $product_id );
-			if ( $product->is_type( 'variable' ) ) {
-				foreach ( $product->get_children() as $variation_id ) {
-					$data[ $variation_id ] = $this->get_frontent_message( $variation_id );
-				}
-			}
-
-			return $data;
-		}
-
-		/**
-		 * Save meta data (price and timestamp) before product save
-		 *
-		 * @param $product_id
-		 * @param $is_variation
+		 * @param $product
+		 * @param $updated_props
 		 *
 		 * @return void
 		 */
-		public function before_product_save( $product_id, $is_variation = false ) {
-			$product = wc_get_product( $product_id );
+		public function product_updated( $product, $updated_props ) {
 
-			if ( $product->is_type( 'variable' ) ) {
+			$product_id = $product->get_id();
+
+			$already_updated = isset( $this->updated_products[ $product_id ] ) && $this->updated_products[ $product_id ] === true;
+
+			if ( $already_updated ) {
 				return;
 			}
 
-			if ( isset( $_POST['_wcolp_price_override_single'] ) ) {
+			$is_override_mode = isset( $_POST['_wcolp_price_override'] ) && isset( $_POST['_wcolp_price_override'][ $product_id ] );
+
+			if ( $is_override_mode ) {
 				$product->update_meta_data( self::META_KEY, [
 					'time'  => time(),
-					'price' => floatval( str_replace( ',', '.', $_POST['_wcolp_price_override_single'] ) )
+					'price' => floatval( str_replace( ',', '.', $_POST['_wcolp_price_override'][ $product_id ] ) )
 				] );
 				$product->save_meta_data();
+				$this->updated_products[ $product_id ] = true;
 
 				return;
 			}
 
-			$this->maybe_auto_update_product_meta( $product );
+			$is_price_prop_updated = in_array( 'regular_price', $updated_props ) || in_array( 'sale_price', $updated_props );
+			$is_price_changed      = isset( $_POST['_wcolp_price_before'] ) && isset( $_POST['_wcolp_price_before'][ $product_id ] );
+
+			if ( $is_price_prop_updated && $is_price_changed ) {
+				$this->maybe_update_lowest_price( $product, $_POST['_wcolp_price_before'][ $product_id ] );
+				$this->updated_products[ $product_id ] = true;
+			}
 
 		}
 
 		/**
-		 * Prepare message to display on frontend
+		 * Prepare 'lowest price' text for clients
 		 *
 		 * @param $product_id
 		 *
 		 * @return string
 		 */
-		private function get_frontent_message( $product_id ) {
+		private function get_lowest_price_text( $product_id ) {
 			$product = wc_get_product( $product_id );
 			if ( $product->meta_exists( self::META_KEY ) && $product->is_on_sale() ) {
 				$data  = $product->get_meta( self::META_KEY );
@@ -175,25 +161,50 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 		}
 
 		/**
-		 * Render HTML to use on product page
+		 * Get product and variations WCOLP metadata (price and timestamp)
+		 *
+		 * @param $product_id
+		 *
+		 * @return array
+		 */
+		private function get_lowest_price_meta( $product_id ) {
+			$product             = wc_get_product( $product_id );
+			$data[ $product_id ] = $this->get_lowest_price_text( $product_id );
+			if ( $product->is_type( 'variable' ) ) {
+				foreach ( $product->get_children() as $variation_id ) {
+					$data[ $variation_id ] = $this->get_lowest_price_text( $variation_id );
+				}
+			}
+
+			return $data;
+		}
+
+		/**
+		 * Render HTML for product page (both simple and variable product)
 		 *
 		 * @return void
+		 * @todo support for grouped products
+		 *
 		 */
 		public function render_product_page() {
 			if ( is_product() ) {
 				global $product;
+
+				echo apply_filters( 'wcolp_before_product_page', '<div id="wcolp-container">' );
 				if ( $product->is_type( 'variable' ) === false ) {
-					echo apply_filters( 'wcolp_before_product_page', '<div id="wcolp-container">' );
-					echo wp_kses_post( $this->get_frontent_message( $product->get_id() ) );
-					echo apply_filters( 'wcolp_after_product_page', '</div>' );
+					echo wp_kses_post( $this->get_lowest_price_text( $product->get_id() ) );
 				}
+				echo apply_filters( 'wcolp_after_product_page', '</div>' );
+
 			}
 		}
 
 		/**
-		 * Render HTML to use on product listings
+		 * Render HTML code for product archives and listings
 		 *
 		 * @return void
+		 * @todo support for grouped products
+		 *
 		 */
 		public function render_product_list() {
 			if ( ( is_shop() || is_product_category() || is_product_tag() || is_product_taxonomy() ) && ! is_product() ) {
@@ -201,8 +212,8 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 				$variation_id = null;
 				if ( $product->is_type( 'variable' ) ) {
 					if ( ! $product->is_on_sale() ) {
-						$prices       = $product->get_variation_prices();
-						$price        = floatval( current( $prices['price'] ) ); //point to first element
+						$prices = $product->get_variation_prices(); // called on WC_Product_Variable
+						//$price        = floatval( current( $prices['price'] ) );
 						$variation_id = key( $prices['price'] ); //get first ID
 					} else {
 						$spri = 999999; //sale price
@@ -227,54 +238,27 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 					$variation_id = $product->get_id();
 				}
 				echo apply_filters( 'wcolp_before_product_list', '<div class="wcolp-container">' );
-				echo wp_kses_post( $this->get_frontent_message( $variation_id ) );
+				echo wp_kses_post( $this->get_lowest_price_text( $variation_id ) );
 				echo apply_filters( 'wcolp_after_product_list', '</div>' );
 			}
 		}
 
 		/**
-		 * @return void
-		 */
-		public function render_variable_product_page() {
-			if ( is_product() ) {
-				global $product;
-				if ( $product->is_type( 'variable' ) ) {
-					echo apply_filters( 'wcolp_before_product_page', '<div id="wcolp-container">' );
-					echo apply_filters( 'wcolp_after_product_page', '</div>' );
-				}
-			}
-		}
-
-		/**
-		 * Render override fields on variations admin page
-		 *
-		 * @param $loop
-		 * @param $variation_data
-		 * @param $variation
-		 *
-		 * @return void
-		 */
-		public function admin_variations_info( $loop, $variation_data, $variation ) {
-			echo '<p></p>';
-			$this->render_price_override_block( wc_get_product( $variation->ID ), '_variation_' . $variation->ID );
-		}
-
-		/**
-		 * Render override fields HTML block
+		 * Render HTML code of custom fields
 		 *
 		 * @param $product_object
-		 * @param $name_suffix
+		 * @param $_id
 		 *
 		 * @return void
 		 */
-		public function render_price_override_block( $product_object, $name_suffix = '_single' ) {
+		public function render_price_override_block( $product_object, $_id = '_single' ) {
 			woocommerce_wp_checkbox( array(
-				'id'                => '_wcolp_price_override_enabled' . $name_suffix,
+				'id'                => '_wcolp_price_override_enabled' . $_id,
 				'label'             => 'Nadpisuję cenę',
-				'wrapper_class'     => $name_suffix !== '_single' ? 'wcolp_form-field form-row form-row-first' : '',
+				'wrapper_class'     => $_id !== '_single' ? 'wcolp_form-field form-row form-row-first' : '',
 				'description'       => __( 'Zaznacz, aby nadpisać najniższą cenę z 30 dni', 'woocommerce' ),
 				'custom_attributes' => array(
-					'onchange' => "jQuery('#_wcolp_price_override" . $name_suffix . "').prop('disabled', ! jQuery(this).is(':checked'))",
+					'onchange'     => "jQuery('#_wcolp_price_override" . $_id . "').prop('disabled', ! jQuery(this).is(':checked'))",
 					'autocomplete' => 'off'
 				)
 			) );
@@ -284,9 +268,10 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 
 			woocommerce_wp_text_input(
 				array(
-					'id'                => '_wcolp_price_override' . $name_suffix,
+					'id'                => '_wcolp_price_override' . $_id,
+					'name'              => '_wcolp_price_override[' . $product_object->get_id() . ']',
 					'value'             => $meta_exists ? $meta_data['price'] : 0,
-					'wrapper_class'     => $name_suffix !== '_single' ? 'wcolp_form-field form-row form-row-last' : '',
+					'wrapper_class'     => $_id !== '_single' ? 'wcolp_form-field form-row form-row-last' : '',
 					'label'             => 'Najniższa cena z 30 dni (' . get_woocommerce_currency_symbol() . ')',
 					'data_type'         => 'price',
 					'custom_attributes' => array(
@@ -296,39 +281,64 @@ if ( ! class_exists( 'WCOLP_Plugin' ) ) {
 					'description'       => $meta_exists ? ( 'Cena z dnia ' . date( "d-m-Y H:i:s", $meta_data['time'] ) ) : 0
 				)
 			);
+
+			woocommerce_wp_hidden_input(
+				array(
+					'id'    => '_wcolp_price_before[' . $product_object->get_id() . ']',
+					'value' => $product_object->get_price()
+				)
+			);
 		}
 
 		/**
-		 * Render override fields on simple product admin page
+		 * Render fields in simple product options section
+		 *
 		 * @return void
 		 */
-		public function simple_product_options() {
+		public function product_options() {
 			global $product_object;
 			$this->render_price_override_block( $product_object );
 		}
 
 		/**
-		 * Save variation's meta data
+		 * Render fields in variation options section
 		 *
-		 * @param $variation_id
+		 * @param $loop
+		 * @param $variation_data
+		 * @param $variation
 		 *
 		 * @return void
 		 */
-		public function after_variation_save( $variation_id ) {
-			$product = wc_get_product( $variation_id );
-
-			if ( isset( $_POST[ '_wcolp_price_override_variation_' . $variation_id ] ) ) {
-				$product->update_meta_data( self::META_KEY, [
-					'time'  => time(),
-					'price' => floatval( str_replace( ',', '.', $_POST[ '_wcolp_price_override_variation_' . $variation_id ] ) )
-				] );
-				$product->save_meta_data();
-
-				return;
-			}
-
-			$this->maybe_auto_update_product_meta( $product );
+		public function variation_options( $loop, $variation_data, $variation ) {
+			echo '<p></p>';
+			$this->render_price_override_block( wc_get_product( $variation->ID ), '_variation_' . $variation->ID );
 		}
+
+		/**
+		 * Enqueue styles and scripts
+		 *
+		 * @return void
+		 */
+		public function enqueue_assets() {
+			if ( is_product() ) {
+				wp_enqueue_script(
+					'wcolp-js',
+					plugins_url( '/', __FILE__ ) . 'script.min.js',
+					array( 'jquery' ),
+					self::VERSION
+				);
+				global $post;
+				wp_add_inline_script( 'wcolp-js', 'const WCOLP = ' . json_encode( $this->get_lowest_price_meta( $post->ID ) ), 'before' );
+			}
+			wp_register_style(
+				'wcolp-css',
+				plugins_url( '/', __FILE__ ) . 'style.min.css',
+				array(),
+				self::VERSION
+			);
+			wp_enqueue_style( 'wcolp-css' );
+		}
+
 
 	}
 
